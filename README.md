@@ -1,2 +1,3 @@
-# element-blocker-extension
+# Managed Custom CSS
  
+Documentation coming soon!
