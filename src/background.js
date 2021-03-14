@@ -10,30 +10,26 @@ var WebsiteGroups, RuleGroups, MasterConfiguration = {};
 var runtimeSettings = {};
 
 
-readAdminPolicies(false);
+readAdminPolicies();
 chrome.storage.managed.onChanged.addListener(readAdminPolicies);
 
 
-function readAdminPolicies(isUpdate=true) {
+function readAdminPolicies() {
     chrome.storage.managed.get(function(managedStorage) {
         ( { WebsiteGroups, RuleGroups, MasterConfiguration } = managedStorage );
-        buildRuntimeSettings(isUpdate);
-        if(isUpdate) {
+        buildRuntimeSettings();
             chrome.tabs.query({}, function(tabs) {
-                console.log(`Notifying all tabs that policy has been updated.`);
+            console.log(`Notifying all tabs that policy has been refreshed.`);
                 for(let tab of tabs) {
-                    chrome.tabs.sendMessage(tab.id, {
-                        "what": "updatedPolicy"
-                    })
+                chrome.tabs.sendMessage(tab.id, "refreshedPolicy")
                 }
             })
-        }
     });    
 }
 
 
 // Use the admin policies to create the runtimeSettings object, which maps hostnames directly to rules
-function buildRuntimeSettings(update=true) {
+function buildRuntimeSettings() {
     runtimeSettings = {};       // clear runtime settings if they already exist
 
     // steps 1 and 2: apply rule groups and individual rules to website groups
@@ -42,9 +38,7 @@ function buildRuntimeSettings(update=true) {
             console.warn(`Website group '${groupTitle}' does not exist.`);
             continue;
         }
-        let hostnames = WebsiteGroups[groupTitle];
-        for(let hostname of hostnames) {
-
+        for(let hostname of WebsiteGroups[groupTitle] /* hostnames */) {
             // step 1: apply rule groups to website groups if rule groups exist in the settings
             for(let rg of groupSettings.ruleGroups || []) {
                 if(!RuleGroups?.[rg])
@@ -58,7 +52,6 @@ function buildRuntimeSettings(update=true) {
 
     // steps 3 and 4: apply rule groups and individual rules to individual websites
     for(let [hostname, indivSettings] of Object.entries( {...MasterConfiguration?.websiteIndivs} )) {
-        
         // step 3: apply rule groups to individual websites if rule groups exist in the settings
         for(let rg of indivSettings.ruleGroups || []) {
             if(!RuleGroups?.[rg])
@@ -69,7 +62,7 @@ function buildRuntimeSettings(update=true) {
         runtimeSettings[hostname] = {...runtimeSettings[hostname], ...indivSettings.ruleIndivs}
     }
 
-    console.info(`Runtime settings for Managed Custom CSS have been ${update ? "updated" : "built"} successfully.`);
+    console.info(`Runtime settings for Managed Custom CSS have been refreshed successfully.`);
 }
 
 // Respond to rules requests as they arrive
@@ -77,10 +70,37 @@ chrome.runtime.onMessage.addListener(
     function(request, sender, sendResponse) {
         let hostname = request.data.hostname;
         if(request.what == "rules") {
+            let cssToInject = buildInjectableCSS(hostname);
             sendResponse({
-                "hostname": hostname,   // send hostname in case one tab has multiple content scripts in iframes
-                "domainRules": {...runtimeSettings[hostname]}   // will send {} when hostname has no rules
-            })
+                "newRules": cssToInject
+            });
+            chrome.scripting.insertCSS({
+                css: cssToInject,
+                origin: "USER",
+                target: {
+                    tabId: sender.tab.id,
+                    frameIds: [sender.frameId]
+                }
+            }, () => {
+                chrome.tabs.removeCSS(sender.tab.id, {
+                    code: request.data.oldRules ?? "",
+                    frameId: sender.frameId,
+                    cssOrigin: "user"
+                });
+            });
         }
     }
 )
+
+// Build a CSS string to inject into tabs with the given hostname
+function buildInjectableCSS(hostname) {
+    let output = "";
+    // for each rule, append syntactically correct CSS to the style element
+    for (let [selector, declarations] of Object.entries( { ...runtimeSettings[hostname] } )) {
+        output += `${selector} /**/ {\n`;
+        for (let [property, value] of Object.entries( { ...declarations } ))
+            output += `\t${property}: ${value} !important; /**/ \n`
+        output += `}\n`
+    }
+    return output;
+}
