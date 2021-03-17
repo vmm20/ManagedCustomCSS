@@ -2,7 +2,7 @@
     "manifest_version": 3,
     "name": "Managed Custom CSS",
     "description": "This extension applies custom CSS rules set by administrators.",
-    "version": "0.2.0",
+    "version": "0.3.0",
     "icons": {
         "128": "icons/128.png"
     },

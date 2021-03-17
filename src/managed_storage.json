@@ -34,6 +34,31 @@
                 }
             }
         },
+        "UniversalRules": {
+            "type": "object",
+            "properties": {
+                "ruleGroups": {
+                    "type": "array",
+                    "items": {
+                        "type": "string",
+                        "pattern": "[A-Za-z0-9_]{3,30}"
+                    }
+                },
+                "ruleIndivs": {
+                    "type": "object",
+                    "patternProperties": {
+                        ".*": {
+                            "type": "object",
+                            "patternProperties": {
+                                ".*": {
+                                    "type": "string"
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        },
         "MasterConfiguration": {
             "type": "object",
             "properties": {
