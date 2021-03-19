@@ -10,54 +10,53 @@
         6) Apply single rule to single website
 */
 
-var WebsiteGroups, RuleGroups, UniversalRules, MasterConfiguration = {};
-var runtimeSettings, runtimeUniversalSettings = {};
+var AdminPolicy = {
+    WebsiteGroups: {},
+    RuleGroups: {},
+    UniversalRules: {},
+    MasterConfiguration: {}
+};
+var runtimeSettings = {};
 
 
-readAdminPolicies();
-chrome.storage.managed.onChanged.addListener(readAdminPolicies);
+chrome.storage.managed.get(function (managedStorage) {
+    AdminPolicy = { ...managedStorage };
+    refreshRuntimeSettings();
+});
 
-
-function readAdminPolicies() {
-    chrome.storage.managed.get(function (managedStorage) {
-        ({ WebsiteGroups, RuleGroups, UniversalRules, MasterConfiguration } = managedStorage);
-        buildRuntimeSettings();
-        chrome.tabs.query({}, function (tabs) {
-            console.log(`Notifying all tabs that policy has been refreshed.`);
-            for (let tab of tabs) {
-                chrome.tabs.sendMessage(tab.id, "refreshedPolicy")
-            }
-        })
-    });
-}
+chrome.storage.managed.onChanged.addListener((changes) => {
+    for (let [policyName, policyChanges] of Object.entries(changes))
+        AdminPolicy[policyName] = { ...policyChanges.newValue };
+    refreshRuntimeSettings();
+});
 
 
 // Use the admin policies to create the runtimeSettings object, which maps hostnames (and * for universal) directly to rules
-function buildRuntimeSettings() {
+function refreshRuntimeSettings() {
     runtimeSettings = {};       // clear runtime settings if they already exist
 
     // steps 1 and 2: apply rule groups and individual rules to all websites
-    for (let rg of UniversalRules?.ruleGroups ?? [] ) {
-        if (!RuleGroups?.[rg])
+    for (let rg of AdminPolicy.UniversalRules?.ruleGroups ?? []) {
+        if (!AdminPolicy.RuleGroups?.[rg])
             console.warn(`Rule group '${rg}' specified in UniversalRules does not exist.`);
         // step 1: apply rule groups to all websites if rule groups exist in the settings
-        runtimeSettings["*"] = { ...runtimeSettings["*"], ...RuleGroups?.[rg] }
+        runtimeSettings["*"] = { ...runtimeSettings["*"], ...AdminPolicy.RuleGroups?.[rg] }
     }
     // step 2: apply individual rules to all websites
-    runtimeSettings["*"] = { ...runtimeSettings["*"], ...UniversalRules?.ruleIndivs };
+    runtimeSettings["*"] = { ...runtimeSettings["*"], ...AdminPolicy.UniversalRules?.ruleIndivs };
 
     // steps 3 and 4: apply rule groups and individual rules to website groups
-    for (let [groupTitle, groupSettings] of Object.entries({ ...MasterConfiguration?.websiteGroups })) {
-        if (!WebsiteGroups?.[groupTitle]) {
+    for (let [groupTitle, groupSettings] of Object.entries({ ...AdminPolicy.MasterConfiguration?.websiteGroups })) {
+        if (!AdminPolicy.WebsiteGroups?.[groupTitle]) {
             console.warn(`Website group '${groupTitle}' does not exist.`);
             continue;
         }
-        for (let hostname of WebsiteGroups[groupTitle] /* hostnames */) {
+        for (let hostname of AdminPolicy.WebsiteGroups[groupTitle] /* hostnames */) {
             // step 3: apply rule groups to website groups if rule groups exist in the settings
             for (let rg of groupSettings.ruleGroups ?? []) {
-                if (!RuleGroups?.[rg])
+                if (!AdminPolicy.RuleGroups?.[rg])
                     console.warn(`Rule group '${rg}' specified in website group ${groupTitle} does not exist.`);
-                runtimeSettings[hostname] = { ...runtimeSettings[hostname], ...RuleGroups?.[rg] }
+                runtimeSettings[hostname] = { ...runtimeSettings[hostname], ...AdminPolicy.RuleGroups?.[rg] }
             }
             // step 4: apply individual rules to website groups
             runtimeSettings[hostname] = { ...runtimeSettings[hostname], ...groupSettings.ruleIndivs }
@@ -65,46 +64,69 @@ function buildRuntimeSettings() {
     }
 
     // steps 5 and 6: apply rule groups and individual rules to individual websites
-    for (let [hostname, indivSettings] of Object.entries({ ...MasterConfiguration?.websiteIndivs })) {
+    for (let [hostname, indivSettings] of Object.entries({ ...AdminPolicy.MasterConfiguration?.websiteIndivs })) {
         // step 5: apply rule groups to individual websites if rule groups exist in the settings
         for (let rg of indivSettings.ruleGroups ?? []) {
-            if (!RuleGroups?.[rg])
+            if (!AdminPolicy.RuleGroups?.[rg])
                 console.warn(`Rule group '${rg}' does not exist.`);
-            runtimeSettings[hostname] = { ...runtimeSettings[hostname], ...RuleGroups?.[rg] }
+            runtimeSettings[hostname] = { ...runtimeSettings[hostname], ...AdminPolicy.RuleGroups?.[rg] }
         }
         // step 6: apply individual rules to individual websites
         runtimeSettings[hostname] = { ...runtimeSettings[hostname], ...indivSettings.ruleIndivs }
     }
 
     console.info(`Runtime settings for Managed Custom CSS have been refreshed successfully.`);
+    chrome.tabs.query({}, function (tabs) {
+        for (let tab of tabs)
+            chrome.tabs.sendMessage(tab.id, "refreshedPolicy")
+        console.info(`All tabs have been notified of refreshed policy.`);
+    })
 }
 
-// Respond to rules requests as they arrive
+// Store injectable CSS for a given tab and frame, then inject it
 chrome.runtime.onMessage.addListener(
     function (request, sender, sendResponse) {
-        let hostname = request.data.hostname;
-        if (request.what == "rules") {
-            let cssToInject = buildInjectableCSS(hostname);
-            sendResponse({
-                "newRules": cssToInject
-            });
-            chrome.scripting.insertCSS({
-                css: cssToInject,
-                origin: "USER",
-                target: {
-                    tabId: sender.tab.id,
-                    frameIds: [sender.frameId]
-                }
-            }, () => {
-                chrome.tabs.removeCSS(sender.tab.id, {
-                    code: request.data.oldRules ?? "",
-                    frameId: sender.frameId,
-                    cssOrigin: "user"
-                });
+        let hostname = request.hostname;
+        let cssToInject = buildInjectableCSS(hostname);
+        chrome.storage.local.set({
+            [[sender.tab.id, sender.frameId]]: cssToInject
+        })
+        chrome.scripting.insertCSS({
+            css: cssToInject,
+            origin: "USER",
+            target: {
+                tabId: sender.tab.id,
+                frameIds: [sender.frameId]
+            }
+        });
+    }
+)
+
+// if injected CSS changes, pick up the storage change event and remove the old CSS from the webpage
+chrome.storage.local.onChanged.addListener((changes) => {
+    for (let [key, valueChanges] of Object.entries(changes)) {
+        let [tabId, frameId] = key.split(",").map((value) => { return Number(value) });
+        // if the storage entry was modified, it will have the newValue property
+        // if the storage entry was deleted because a tab was closed, it will not have the newValue property
+        if(valueChanges.newValue) {
+            chrome.tabs.removeCSS(tabId, {
+                code: valueChanges.oldValue ?? "",
+                frameId: frameId,
+                cssOrigin: "user"
             });
         }
     }
-)
+})
+
+// when a tab is closed, clear all associated entries from local storage
+chrome.tabs.onRemoved.addListener((tabId) => {
+    chrome.storage.local.get((storage) => {
+        chrome.storage.local.remove(Object.keys(storage).filter((value) => {
+            return value.startsWith(`${tabId},`);
+        }))
+    });
+})
+
 
 // Build a CSS string to inject into tabs with the given hostname
 function buildInjectableCSS(hostname) {
