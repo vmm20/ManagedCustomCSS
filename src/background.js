@@ -19,7 +19,7 @@ var AdminPolicy = {
 var runtimeSettings = {};
 
 
-chrome.storage.managed.get(function (managedStorage) {
+chrome.storage.managed.get((managedStorage) => {
     AdminPolicy = { ...managedStorage };
     refreshRuntimeSettings();
 });
@@ -29,6 +29,56 @@ chrome.storage.managed.onChanged.addListener((changes) => {
         AdminPolicy[policyName] = { ...policyChanges.newValue };
     refreshRuntimeSettings();
 });
+
+
+
+// Store injectable CSS for a given tab and frame, then inject it
+chrome.runtime.onMessage.addListener((request, sender) => {
+    let hostname = request.hostname;
+    let cssToInject = buildInjectableCSS(hostname);
+    chrome.storage.local.set({
+        [[sender.tab.id, sender.frameId]]: cssToInject
+    });
+    chrome.scripting.insertCSS({
+        css: cssToInject,
+        origin: "USER",
+        target: {
+            tabId: sender.tab.id,
+            frameIds: [sender.frameId]
+        }
+    });
+})
+
+// if injected CSS changes, pick up the storage change event and remove the old CSS from the webpage
+chrome.storage.local.onChanged.addListener((changes) => {
+    for (let [key, valueChanges] of Object.entries(changes)) {
+        let [tabId, frameId] = key.split(",").map((value) => { return Number(value) });
+        // if the storage entry was modified, it will have the newValue property
+        // if the storage entry was deleted because a tab was closed, it will not have the newValue property
+        if (valueChanges.newValue) {
+            chrome.tabs.removeCSS(tabId, {
+                code: valueChanges.oldValue ?? "",
+                frameId: frameId,
+                cssOrigin: "user"
+            });
+        }
+    }
+})
+
+// when a tab is closed, clear all associated entries from local storage
+chrome.tabs.onRemoved.addListener((tabId) => {
+    chrome.storage.local.get((storage) => {
+        chrome.storage.local.remove(Object.keys(storage).filter((value) => {
+            return value.startsWith(`${tabId},`);
+        }))
+    });
+})
+
+// clear local storage when browser starts just in case the last exit was abnormal
+chrome.runtime.onStartup.addListener(() => {
+    chrome.storage.local.clear();
+})
+
 
 
 // Use the admin policies to create the runtimeSettings object, which maps hostnames (and * for universal) directly to rules
@@ -82,50 +132,6 @@ function refreshRuntimeSettings() {
         console.info(`All tabs have been notified of refreshed policy.`);
     })
 }
-
-// Store injectable CSS for a given tab and frame, then inject it
-chrome.runtime.onMessage.addListener(
-    function (request, sender, sendResponse) {
-        let hostname = request.hostname;
-        let cssToInject = buildInjectableCSS(hostname);
-        chrome.storage.local.set({
-            [[sender.tab.id, sender.frameId]]: cssToInject
-        })
-        chrome.scripting.insertCSS({
-            css: cssToInject,
-            origin: "USER",
-            target: {
-                tabId: sender.tab.id,
-                frameIds: [sender.frameId]
-            }
-        });
-    }
-)
-
-// if injected CSS changes, pick up the storage change event and remove the old CSS from the webpage
-chrome.storage.local.onChanged.addListener((changes) => {
-    for (let [key, valueChanges] of Object.entries(changes)) {
-        let [tabId, frameId] = key.split(",").map((value) => { return Number(value) });
-        // if the storage entry was modified, it will have the newValue property
-        // if the storage entry was deleted because a tab was closed, it will not have the newValue property
-        if(valueChanges.newValue) {
-            chrome.tabs.removeCSS(tabId, {
-                code: valueChanges.oldValue ?? "",
-                frameId: frameId,
-                cssOrigin: "user"
-            });
-        }
-    }
-})
-
-// when a tab is closed, clear all associated entries from local storage
-chrome.tabs.onRemoved.addListener((tabId) => {
-    chrome.storage.local.get((storage) => {
-        chrome.storage.local.remove(Object.keys(storage).filter((value) => {
-            return value.startsWith(`${tabId},`);
-        }))
-    });
-})
 
 
 // Build a CSS string to inject into tabs with the given hostname
